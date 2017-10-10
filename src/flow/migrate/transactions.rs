@@ -4,14 +4,16 @@ use flow::payload::{EgressForBase, IngressFromBase};
 use petgraph;
 use petgraph::graph::NodeIndex;
 use std::borrow::Borrow;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use slog::Logger;
+use petgraph::visit::Dfs;
 
 fn count_base_ingress(
     graph: &Graph,
     source: NodeIndex,
     nodes: &[(NodeIndex, bool)],
     domain: &domain::Index,
+    connected: &HashSet<(NodeIndex, NodeIndex)>,
 ) -> IngressFromBase {
     let ingress_nodes: Vec<_> = nodes
         .into_iter()
@@ -26,7 +28,8 @@ fn count_base_ingress(
             let mut num_paths = ingress_nodes
                 .iter()
                 .filter(|&&ingress| {
-                    petgraph::algo::has_path_connecting(graph, base, ingress, None)
+                    connected.contains(&(base, ingress))
+                    // petgraph::algo::has_path_connecting(graph, base, ingress, None)
                 })
                 .map(|&ingress| if graph[ingress].is_shard_merger() {
                     ::SHARDS
@@ -46,7 +49,7 @@ fn count_base_ingress(
         .collect()
 }
 
-fn base_egress_map(graph: &Graph, source: NodeIndex, nodes: &[(NodeIndex, bool)]) -> EgressForBase {
+fn base_egress_map(graph: &Graph, source: NodeIndex, nodes: &[(NodeIndex, bool)], connected: &HashSet<(NodeIndex, NodeIndex)>) -> EgressForBase {
     let output_nodes: Vec<_> = nodes
         .into_iter()
         .map(|&(ni, _)| ni)
@@ -60,7 +63,8 @@ fn base_egress_map(graph: &Graph, source: NodeIndex, nodes: &[(NodeIndex, bool)]
             let outs = output_nodes
                 .iter()
                 .filter(|&&out| {
-                    petgraph::algo::has_path_connecting(graph, base, out, None)
+                    connected.contains(&(base, out))
+                    // petgraph::algo::has_path_connecting(graph, base, out, None)
                 })
                 .map(|&out| *graph[out].local_addr())
                 .collect();
@@ -69,19 +73,32 @@ fn base_egress_map(graph: &Graph, source: NodeIndex, nodes: &[(NodeIndex, bool)]
         .collect()
 }
 
+fn connected_to_base(graph: &Graph, source: NodeIndex) -> HashSet<(NodeIndex, NodeIndex)> {
+    let mut connected = HashSet::new();
+    for base in graph.neighbors_directed(source, petgraph::EdgeDirection::Outgoing) {
+        let mut dfs = Dfs::new(&graph, base);
+        while let Some(ni) = dfs.next(&graph) {
+            connected.insert((base, ni));
+        }
+    }
+
+    connected
+}
+
 pub fn analyze_graph(
     graph: &Graph,
     source: NodeIndex,
     domain_nodes: HashMap<domain::Index, Vec<(NodeIndex, bool)>>,
 ) -> HashMap<domain::Index, (IngressFromBase, EgressForBase)> {
+    let connected = connected_to_base(graph, source);
     domain_nodes
         .into_iter()
         .map(|(domain, nodes): (_, Vec<(NodeIndex, bool)>)| {
             (
                 domain,
                 (
-                    count_base_ingress(graph, source, &nodes[..], &domain),
-                    base_egress_map(graph, source, &nodes[..]),
+                    count_base_ingress(graph, source, &nodes[..], &domain, &connected),
+                    base_egress_map(graph, source, &nodes[..], &connected),
                 ),
             )
         })
